@@ -1,0 +1,53 @@
+extends layout
+
+block content
+  .app-container
+    .card
+      .card-header
+        .icon-badge
+          i.fa-solid.fa-network-wired
+        h1 Wake-on-LAN
+        p.subtitle 부팅할 장비를 선택하고 비밀번호를 입력하세요.
+
+      if targets && targets.length > 0
+        form#wolForm.form-content(onsubmit="return false;")
+          .input-group
+            label(for="targetSelect")
+              i.fa-solid.fa-desktop
+              span 대상 장비 선택
+            .select-wrapper
+              select#targetSelect
+                each target in targets
+                  option(value=target.id)= target.name
+
+          .input-group
+            label(for="password")
+              i.fa-solid.fa-lock
+              span 비밀번호
+            .input-wrapper
+              input#password(
+                type="password"
+                placeholder="비밀번호를 입력하세요"
+                autocomplete="current-password"
+                required
+              )
+              button#togglePassword.toggle-btn(type="button" aria-label="비밀번호 보기 토글")
+                i.fa-regular.fa-eye
+
+          button#wakeBtn.btn-wake(type="button")
+            i.fa-solid.fa-power-off
+            span#wakeBtnText 장비 켜기
+
+        #statusMessage.status-message.hidden
+          .status-icon
+            i.fa-solid.fa-circle-notch.fa-spin
+          .status-text
+            .status-title
+            .status-desc
+      else
+        .status-message.error(style="display: flex; margin-top: 10px;")
+          .status-icon
+            i.fa-solid.fa-triangle-exclamation
+          .status-text
+            .status-title 등록된 장비가 없습니다
+            .status-desc config.json 파일의 targets 항목에 장비를 등록해주세요.

@@ -1,0 +1,12 @@
+extends layout
+
+block content
+  .app-container
+    .card(style="text-align: center;")
+      .icon-badge(style="color: var(--error-color); border-color: rgba(239, 68, 68, 0.3); background: rgba(239, 68, 68, 0.15);")
+        i.fa-solid.fa-triangle-exclamation
+      h1= message || '오류가 발생했습니다'
+      p.subtitle(style="margin-bottom: 24px;")= error.status ? `상태 코드: ${error.status}` : '요청을 처리하는 중 문제가 발생했습니다.'
+      a.btn-wake(href="/" style="text-decoration: none; display: inline-flex; width: auto; padding: 12px 24px;")
+        i.fa-solid.fa-house
+        span 메인으로 이동

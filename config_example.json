@@ -1,0 +1,16 @@
+{
+  "passwordHash": "<password hash here>",
+  "wolCommand": "wakeonlan",
+  "targets": [
+    {
+      "id": "workstation",
+      "name": "Workstation",
+      "mac": "AA:BB:CC:DD:EE:FF"
+    },
+    {
+      "id": "desktop",
+      "name": "Desktop",
+      "mac": "11:22:33:44:55:66"
+    }
+  ]
+}
