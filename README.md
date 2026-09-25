@@ -57,15 +57,17 @@ PORT=8080 npm start
 
 서버 실행 후 브라우저에서 `http://localhost:3000`으로 접속하세요.
 
-## 🛡️ 주요 보안 기능
+## 🛡️ 주요 보안 및 안정성 기능
 
 1. **대상 장비 화이트리스트 검증**:
    - 클라이언트에서 임의의 MAC 주소를 전송할 수 없으며, 서버에 미리 등록된 장비(`id`)만 지정하여 부팅합니다.
-2. **scrypt 단방향 암호화 해시**:
-   - 비밀번호는 무작위 솔트(Salt)가 적용된 scrypt 알고리즘으로 안전하게 저장 및 검증됩니다.
-3. **무차별 대입 공격(Brute-Force) 차단**:
-   - Cloudflare 프록시 환경(`cf-connecting-ip`)을 지원하며, 5회 연속 비밀번호 오류 시 5분간 요청이 자동 차단됩니다.
+2. **비동기 scrypt 단방향 암호화 해시 (DoS 방어)**:
+   - 비밀번호는 무작위 솔트(Salt)가 적용된 scrypt 알고리즘으로 검증되며, 비동기 워커 스레드풀에서 처리되어 Node.js 이벤트 루프 블로킹(DoS)을 방지합니다.
+3. **무차별 대입 공격(Brute-Force) 차단 (`express-rate-limit`)**:
+   - `express-rate-limit` 표준 미들웨어를 도입하여 성공(2xx) 요청은 제외하고 실패한 시도만 카운트하며, 15분 내 5회 오류 시 요청을 자동 차단합니다. 표준 `RateLimit-*` 및 `Retry-After` 헤더를 지원합니다.
 4. **타이밍 공격(Timing Attack) 방어**:
    - `crypto.timingSafeEqual` 상수 시간 비교로 미세한 연산 시간 차이를 통한 비밀번호 유추를 원천 차단합니다.
 5. **보안 헤더 및 정보 노출 차단**:
-   - `X-Frame-Options: DENY`, MIME 스니핑 방지 헤더, `x-powered-by` 비활성화 및 에러 페이지 내 스택 트레이스 노출 방지.
+   - `Content-Security-Policy`, `X-Frame-Options: DENY`, MIME 스니핑 방지 헤더, COOP, CORP, `x-powered-by` 비활성화 적용.
+6. **내장 UDP 매직 패킷 송신**:
+   - Node.js `dgram` 소켓을 활용한 내장 UDP 브로드캐스트를 지원하여 외부 패키지 설치 없이도 안정적으로 매직 패킷을 전송합니다.

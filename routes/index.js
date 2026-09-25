@@ -4,12 +4,19 @@ const { execFile } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { promisify } = require('util');
+const dgram = require('dgram');
 
-// 설정 불러오기
-function getConfig() {
-  const configPath = path.join(__dirname, '..', 'config.json');
+const scryptAsync = promisify(crypto.scrypt);
+
+// -------------------------------------------------------------
+// 설정 캐싱 및 자동 갱신
+// -------------------------------------------------------------
+const configPath = path.join(__dirname, '..', 'config.json');
+let cachedConfig = null;
+
+function loadConfig() {
   let config = {};
-
   try {
     if (fs.existsSync(configPath)) {
       const data = fs.readFileSync(configPath, 'utf8');
@@ -21,73 +28,57 @@ function getConfig() {
     console.error('config.json 읽기 오류:', err);
   }
 
-  return {
+  cachedConfig = {
     passwordHash: process.env.WOL_PASSWORD_HASH || config.passwordHash || '',
-    wolCommand: process.env.WOL_COMMAND || config.wolCommand || 'wakeonlan',
+    wolCommand: process.env.WOL_COMMAND || config.wolCommand || 'builtin',
     targets: Array.isArray(config.targets) ? config.targets : []
   };
+
+  return cachedConfig;
 }
 
-// -------------------------------------------------------------
-// Rate Limiter (Brute-Force 방어 인메모리 관리자)
-// -------------------------------------------------------------
-const loginAttempts = new Map(); // ip -> { count, lockedUntil }
-const MAX_FAILED_ATTEMPTS = 5;
-const LOCK_TIME_MS = 5 * 60 * 1000; // 5분 잠금
-
-// 주기적으로 만료된 IP 기록 정리 (10분마다)
-setInterval(() => {
-  const now = Date.now();
-  for (const [ip, record] of loginAttempts.entries()) {
-    if (record.lockedUntil && record.lockedUntil < now) {
-      loginAttempts.delete(ip);
-    }
+// 파일 변경 감지 (존재할 경우)
+try {
+  if (fs.existsSync(configPath)) {
+    fs.watch(configPath, { persistent: false }, (eventType) => {
+      if (eventType === 'change') {
+        loadConfig();
+      }
+    });
   }
-}, 10 * 60 * 1000);
-
-function checkRateLimit(ip) {
-  const now = Date.now();
-  const record = loginAttempts.get(ip);
-  if (!record) return { allowed: true };
-
-  if (record.lockedUntil && record.lockedUntil > now) {
-    const remainingSec = Math.ceil((record.lockedUntil - now) / 1000);
-    return {
-      allowed: false,
-      message: `비밀번호 연속 오류로 일시 차단되었습니다. ${remainingSec}초 후에 다시 시도해주세요.`
-    };
-  }
-
-  if (record.lockedUntil && record.lockedUntil <= now) {
-    loginAttempts.delete(ip);
-  }
-
-  return { allowed: true };
+} catch (e) {
+  // watch 실패 시 무시하고 캐시 사용
 }
 
-function recordFailedAttempt(ip) {
-  const now = Date.now();
-  const record = loginAttempts.get(ip) || { count: 0, lockedUntil: 0 };
-  record.count += 1;
+function getConfig() {
+  return cachedConfig || loadConfig();
+}
 
-  if (record.count >= MAX_FAILED_ATTEMPTS) {
-    record.lockedUntil = now + LOCK_TIME_MS;
+// 초기 로드
+loadConfig();
+
+const { rateLimit } = require('express-rate-limit');
+
+// -------------------------------------------------------------
+// Rate Limiter (Brute-Force 방어 미들웨어)
+// -------------------------------------------------------------
+const wakeRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15분 슬라이딩 윈도우
+  limit: 5, // 최대 5회 실패 허용
+  skipSuccessfulRequests: true, // 2xx 성공 응답 시에는 실패 카운트 제외 (실패만 카운트)
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  message: {
+    success: false,
+    message: '비밀번호 연속 오류로 일시 차단되었습니다. 잠시 후 다시 시도해주세요.'
   }
-  loginAttempts.set(ip, record);
-
-  const remaining = Math.max(0, MAX_FAILED_ATTEMPTS - record.count);
-  return remaining;
-}
-
-function resetAttempts(ip) {
-  loginAttempts.delete(ip);
-}
+});
 
 // -------------------------------------------------------------
-// 비밀번호 해시 검증 (scrypt 기반 + timingSafeEqual)
+// 비밀번호 해시 비동기 검증 (scrypt 비동기 + timingSafeEqual)
 // -------------------------------------------------------------
-function verifyPassword(inputPassword, passwordHash) {
-  if (!inputPassword || !passwordHash || !passwordHash.startsWith('scrypt$')) {
+async function verifyPassword(inputPassword, passwordHash) {
+  if (typeof inputPassword !== 'string' || !inputPassword || !passwordHash || !passwordHash.startsWith('scrypt$')) {
     return false;
   }
 
@@ -101,7 +92,8 @@ function verifyPassword(inputPassword, passwordHash) {
       const salt = Buffer.from(parts[4], 'hex');
       const expectedHash = Buffer.from(parts[5], 'hex');
 
-      const derivedKey = crypto.scryptSync(inputPassword, salt, expectedHash.length, {
+      // 비동기 처리: libuv 스레드풀에서 실행되어 메인 이벤트 루프 블로킹 방지
+      const derivedKey = await scryptAsync(inputPassword, salt, expectedHash.length, {
         N: cost,
         r: blockSize,
         p: parallel,
@@ -116,6 +108,31 @@ function verifyPassword(inputPassword, passwordHash) {
   }
 
   return false;
+}
+
+// -------------------------------------------------------------
+// 내장 Wake-on-LAN UDP 매직 패킷 브로드캐스트
+// -------------------------------------------------------------
+function sendMagicPacketNative(macAddress, broadcastIp = '255.255.255.255', port = 9) {
+  return new Promise((resolve, reject) => {
+    const cleanMac = macAddress.replace(/[:-]/g, '');
+    const macBuffer = Buffer.from(cleanMac, 'hex');
+    const magicPacket = Buffer.alloc(102);
+    magicPacket.fill(0xff, 0, 6);
+    for (let i = 0; i < 16; i++) {
+      macBuffer.copy(magicPacket, 6 + i * 6);
+    }
+
+    const client = dgram.createSocket('udp4');
+    client.bind(() => {
+      client.setBroadcast(true);
+      client.send(magicPacket, 0, magicPacket.length, port, broadcastIp, (err) => {
+        client.close();
+        if (err) return reject(err);
+        resolve();
+      });
+    });
+  });
 }
 
 /* GET home page. */
@@ -133,22 +150,27 @@ router.get('/', function(req, res, next) {
 });
 
 /* POST wake request */
-router.post('/api/wake', function(req, res) {
-  const clientIp = req.headers['cf-connecting-ip'] || req.ip || req.connection.remoteAddress || 'unknown';
+router.post('/api/wake', wakeRateLimiter, async function(req, res) {
+  const { password, targetId } = req.body;
 
-  // 1. Rate Limiting 검사
-  const rateLimit = checkRateLimit(clientIp);
-  if (!rateLimit.allowed) {
-    return res.status(429).json({
+  // 입력값 타입 및 길이 검증 (Type Confusion 및 DoS 방어)
+  if (typeof password !== 'string' || password.length === 0 || password.length > 128) {
+    return res.status(400).json({
       success: false,
-      message: rateLimit.message
+      message: '비밀번호 입력이 올바르지 않습니다.'
     });
   }
 
-  const { password, targetId } = req.body;
+  if (typeof targetId !== 'string' || targetId.length === 0 || targetId.length > 64) {
+    return res.status(400).json({
+      success: false,
+      message: '대상 장비 선택이 올바르지 않습니다.'
+    });
+  }
+
   const config = getConfig();
 
-  // 2. 비밀번호 해시 설정 여부 확인
+  // 1. 비밀번호 해시 설정 여부 확인
   if (!config.passwordHash) {
     return res.status(500).json({
       success: false,
@@ -156,22 +178,14 @@ router.post('/api/wake', function(req, res) {
     });
   }
 
-  // 3. 비밀번호 해시 검증
-  const isValid = verifyPassword(password, config.passwordHash);
+  // 2. 비밀번호 해시 비동기 검증
+  const isValid = await verifyPassword(password, config.passwordHash);
   if (!isValid) {
-    const remaining = recordFailedAttempt(clientIp);
-    const message = remaining > 0 
-      ? `비밀번호가 올바르지 않습니다. (남은 시도 횟수: ${remaining}회)`
-      : `비밀번호 5회 오류로 5분간 시도가 제한됩니다.`;
-
     return res.status(401).json({
       success: false,
-      message: message
+      message: '비밀번호가 올바르지 않습니다.'
     });
   }
-
-  // 인증 성공 시 실패 카운트 리셋
-  resetAttempts(clientIp);
 
   // 4. 대상 장비 조회
   if (config.targets.length === 0) {
@@ -198,22 +212,47 @@ router.post('/api/wake', function(req, res) {
     });
   }
 
-  // 5. wol 명령어 안전 실행 (execFile)
+  // 5. WOL 패킷 전송 (외부 CLI 지정 시 우선 실행, 실패하거나 미지정 시 내장 UDP 전송)
   const command = config.wolCommand;
-  execFile(command, [mac], (error, stdout, stderr) => {
-    if (error) {
-      console.error(`명령 실행 실패 [${command} ${mac}]:`, error);
+  if (command && command !== 'builtin' && command !== 'native') {
+    execFile(command, [mac], async (error, stdout, stderr) => {
+      if (error) {
+        console.warn(`CLI 실행 실패 [${command} ${mac}], 내장 UDP 소켓으로 전송을 시도합니다:`, error.message);
+        try {
+          await sendMagicPacketNative(mac);
+          return res.json({
+            success: true,
+            message: `${target.name}으로 Wake-on-LAN 패킷을 전송했습니다!`
+          });
+        } catch (nativeErr) {
+          console.error('내장 WOL 전송 실패:', nativeErr);
+          return res.status(500).json({
+            success: false,
+            message: 'Wake-on-LAN 패킷 전송 중 서버 오류가 발생했습니다.'
+          });
+        }
+      }
+
+      return res.json({
+        success: true,
+        message: `${target.name}으로 Wake-on-LAN 패킷을 전송했습니다!`
+      });
+    });
+  } else {
+    try {
+      await sendMagicPacketNative(mac);
+      return res.json({
+        success: true,
+        message: `${target.name}으로 Wake-on-LAN 패킷을 전송했습니다!`
+      });
+    } catch (err) {
+      console.error('WOL 패킷 전송 실패:', err);
       return res.status(500).json({
         success: false,
         message: 'Wake-on-LAN 패킷 전송 중 서버 오류가 발생했습니다.'
       });
     }
-
-    return res.json({
-      success: true,
-      message: `${target.name}으로 Wake-on-LAN 패킷을 전송했습니다!`
-    });
-  });
+  }
 });
 
 module.exports = router;

@@ -45,7 +45,15 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  // 3. 엔터 키 누를 때 바로 전송
+  // 3. 엔터 키 누를 때 또는 폼 submit 시 전송
+  const wolForm = document.getElementById('wolForm');
+  if (wolForm) {
+    wolForm.addEventListener('submit', (e) => {
+      e.preventDefault();
+      triggerWake();
+    });
+  }
+
   passwordInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
       e.preventDefault();

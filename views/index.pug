@@ -10,7 +10,7 @@ block content
         p.subtitle 부팅할 장비를 선택하고 비밀번호를 입력하세요.
 
       if targets && targets.length > 0
-        form#wolForm.form-content(onsubmit="return false;")
+        form#wolForm.form-content
           .input-group
             label(for="targetSelect")
               i.fa-solid.fa-desktop
@@ -45,7 +45,7 @@ block content
             .status-title
             .status-desc
       else
-        .status-message.error(style="display: flex; margin-top: 10px;")
+        .status-message.error
           .status-icon
             i.fa-solid.fa-triangle-exclamation
           .status-text
